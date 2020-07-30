@@ -24,7 +24,7 @@ func (s *Storage) resource(path string) string {
 }
 
 func (s *Storage) auth(req *http.Request) {
-	req.Header.Set("Authorization", fmt.Sprintf("Firebase %s", s.Token))
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", s.Token))
 }
 
 func (s *Storage) request(auth bool, verb string, loc string, data io.Reader) (map[string]interface{}, error) {
