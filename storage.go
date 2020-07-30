@@ -118,7 +118,7 @@ func (s *Storage) Put(file, path string) (map[string]interface{}, error) {
 	}
 	defer data.Close()
 
-	res, err := s.request(true, "PUT", s.resource(path), data)
+	res, err := s.request(true, "POST", s.resource(path), data)
 	if err != nil {
 		return nil, err
 	}
