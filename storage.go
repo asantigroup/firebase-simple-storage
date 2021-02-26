@@ -2,13 +2,18 @@ package firebasestorage
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"io/ioutil"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
+	"time"
+
+	"github.com/flowchartsman/retry"
 )
 
 // Storage represent a Firebase Storage client
@@ -27,24 +32,43 @@ func (s *Storage) auth(req *http.Request) {
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", s.Token))
 }
 
-func (s *Storage) request(auth bool, verb string, loc string, data io.Reader) (map[string]interface{}, error) {
-	req, err := http.NewRequest(verb, loc, data)
+func (s *Storage) request(ctx context.Context, auth bool, verb string, loc string, data io.Reader) (map[string]interface{}, error) {
+	retrier := retry.NewRetrier(7, time.Second, 64*time.Second)
+	var res *http.Response
+	err := retrier.RunContext(ctx, func(ctx context.Context) error {
+		req, err := http.NewRequest(verb, loc, data)
+		if err != nil {
+			return err
+		}
+
+		if auth {
+			s.auth(req)
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		client := &http.Client{}
+		req = req.WithContext(ctx)
+		res, err := client.Do(req)
+
+		switch {
+		case err != nil:
+			// request error - return it
+			return err
+		case res.StatusCode == 0 || res.StatusCode >= 500:
+			// retryable StatusCode - return it
+			log.Printf("Retryable HTTP status: %v", http.StatusText(res.StatusCode))
+			return fmt.Errorf("Retryable HTTP status: %s", http.StatusText(res.StatusCode))
+		case res.StatusCode != 200:
+			// non-retryable error - stop now
+			return retry.Stop(fmt.Errorf("Non-retryable HTTP status: %s", http.StatusText(res.StatusCode)))
+		}
+		defer res.Body.Close()
+
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-
-	if auth {
-		s.auth(req)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{}
-	res, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-
-	defer res.Body.Close()
 
 	body, err := ioutil.ReadAll(res.Body)
 	if err != nil {
@@ -61,15 +85,15 @@ func (s *Storage) request(auth bool, verb string, loc string, data io.Reader) (m
 }
 
 // Object will fetch the storage object metadata from Firebase
-func (s *Storage) Object(path string) (map[string]interface{}, error) {
-	return s.request(true, "GET", s.resource(path), nil)
+func (s *Storage) Object(ctx context.Context, path string) (map[string]interface{}, error) {
+	return s.request(ctx, true, "GET", s.resource(path), nil)
 }
 
 // Download will download a file from Firebase
 // `path` - object path in firebase
 // `toFile` - local file to write to
-func (s *Storage) Download(path, toFile string) error {
-	obj, err := s.Object(path)
+func (s *Storage) Download(ctx context.Context, path, toFile string) error {
+	obj, err := s.Object(ctx, path)
 	if err != nil {
 		return err
 	}
@@ -111,14 +135,14 @@ func (s *Storage) Read(path, downloadToken string) (io.ReadCloser, error) {
 }
 
 // Put will store a file in Firebase Storage
-func (s *Storage) Put(file, path string) (map[string]interface{}, error) {
+func (s *Storage) Put(ctx context.Context, file, path string) (map[string]interface{}, error) {
 	data, err := os.Open(file)
 	if err != nil {
 		return nil, err
 	}
 	defer data.Close()
 
-	res, err := s.request(true, "POST", s.resource(path), data)
+	res, err := s.request(ctx, true, "POST", s.resource(path), data)
 	if err != nil {
 		return nil, err
 	}
@@ -130,7 +154,7 @@ func (s *Storage) Put(file, path string) (map[string]interface{}, error) {
 //
 //You can call this when operations fail, when the time almost expires, or before
 //every operation just to be safe.
-func (s *Storage) Refresh() error {
+func (s *Storage) Refresh(ctx context.Context) error {
 	loc := fmt.Sprintf("https://securetoken.googleapis.com/v1/token?key=%s", s.APIKey)
 	data := map[string]string{
 		"grantType":    "refresh_token",
@@ -140,7 +164,7 @@ func (s *Storage) Refresh() error {
 	if err != nil {
 		return err
 	}
-	res, err := s.request(false, "POST", loc, bytes.NewBuffer(b))
+	res, err := s.request(ctx, false, "POST", loc, bytes.NewBuffer(b))
 	if err != nil {
 		return err
 	}
