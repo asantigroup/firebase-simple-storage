@@ -32,21 +32,12 @@ func (s *Storage) auth(req *http.Request) {
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", s.Token))
 }
 
-func (s *Storage) request(ctx context.Context, auth bool, verb string, loc string, b []byte, file string) (map[string]interface{}, error) {
+func (s *Storage) request(ctx context.Context, auth bool, verb string, loc string, data io.ReadSeeker) (map[string]interface{}, error) {
 	retrier := retry.NewRetrier(7, time.Second, 64*time.Second)
 	var res *http.Response
 	err := retrier.RunContext(ctx, func(ctx context.Context) error {
-		var data io.Reader
-		if b != nil {
-			data = bytes.NewBuffer(b)
-		}
-		if file != "" {
-			data, err := os.Open(file)
-			if err != nil {
-				// non-retryable error - stop now
-				return retry.Stop(err)
-			}
-			defer data.Close()
+		if data != nil {
+			data.Seek(0, 0)
 		}
 		req, err := http.NewRequest(verb, loc, data)
 		if err != nil {
@@ -57,9 +48,9 @@ func (s *Storage) request(ctx context.Context, auth bool, verb string, loc strin
 			s.auth(req)
 		}
 		req.Header.Set("Content-Type", "application/json")
+		client := &http.Client{}
 		req = req.WithContext(ctx)
-		res, err = http.DefaultClient.Do(req)
-
+		res, err = client.Do(req)
 		switch {
 		case err != nil:
 			// request error - return it
@@ -96,7 +87,7 @@ func (s *Storage) request(ctx context.Context, auth bool, verb string, loc strin
 
 // Object will fetch the storage object metadata from Firebase
 func (s *Storage) Object(ctx context.Context, path string) (map[string]interface{}, error) {
-	return s.request(ctx, true, "GET", s.resource(path), nil, "")
+	return s.request(ctx, true, "GET", s.resource(path), nil)
 }
 
 // Download will download a file from Firebase
@@ -146,7 +137,17 @@ func (s *Storage) Read(path, downloadToken string) (io.ReadCloser, error) {
 
 // Put will store a file in Firebase Storage
 func (s *Storage) Put(ctx context.Context, file, path string) (map[string]interface{}, error) {
-	res, err := s.request(ctx, true, "POST", s.resource(path), nil, file)
+	data, err := os.Open(file)
+	if err != nil {
+		return nil, err
+	}
+	defer data.Close()
+	b, err := ioutil.ReadAll(data)
+	if err != nil {
+		return nil, err
+	}
+
+	res, err := s.request(ctx, true, "POST", s.resource(path), bytes.NewReader(b))
 	if err != nil {
 		return nil, err
 	}
@@ -168,7 +169,7 @@ func (s *Storage) Refresh(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	res, err := s.request(ctx, false, "POST", loc, b, "")
+	res, err := s.request(ctx, false, "POST", loc, bytes.NewReader(b))
 	if err != nil {
 		return err
 	}
