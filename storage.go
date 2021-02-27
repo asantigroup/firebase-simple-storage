@@ -32,10 +32,22 @@ func (s *Storage) auth(req *http.Request) {
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", s.Token))
 }
 
-func (s *Storage) request(ctx context.Context, auth bool, verb string, loc string, data io.Reader) (map[string]interface{}, error) {
+func (s *Storage) request(ctx context.Context, auth bool, verb string, loc string, b []byte, file string) (map[string]interface{}, error) {
 	retrier := retry.NewRetrier(7, time.Second, 64*time.Second)
 	var res *http.Response
 	err := retrier.RunContext(ctx, func(ctx context.Context) error {
+		var data io.Reader
+		if b != nil {
+			data = bytes.NewBuffer(b)
+		}
+		if file != "" {
+			data, err := os.Open(file)
+			if err != nil {
+				// non-retryable error - stop now
+				return retry.Stop(err)
+			}
+			defer data.Close()
+		}
 		req, err := http.NewRequest(verb, loc, data)
 		if err != nil {
 			return err
@@ -45,14 +57,13 @@ func (s *Storage) request(ctx context.Context, auth bool, verb string, loc strin
 			s.auth(req)
 		}
 		req.Header.Set("Content-Type", "application/json")
-
-		client := &http.Client{}
 		req = req.WithContext(ctx)
-		res, err := client.Do(req)
+		res, err = http.DefaultClient.Do(req)
 
 		switch {
 		case err != nil:
 			// request error - return it
+			log.Printf("Request error: %v", err)
 			return err
 		case res.StatusCode == 0 || res.StatusCode >= 500:
 			// retryable StatusCode - return it
@@ -62,13 +73,12 @@ func (s *Storage) request(ctx context.Context, auth bool, verb string, loc strin
 			// non-retryable error - stop now
 			return retry.Stop(fmt.Errorf("Non-retryable HTTP status: %s", http.StatusText(res.StatusCode)))
 		}
-		defer res.Body.Close()
-
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
+	defer res.Body.Close()
 
 	body, err := ioutil.ReadAll(res.Body)
 	if err != nil {
@@ -86,7 +96,7 @@ func (s *Storage) request(ctx context.Context, auth bool, verb string, loc strin
 
 // Object will fetch the storage object metadata from Firebase
 func (s *Storage) Object(ctx context.Context, path string) (map[string]interface{}, error) {
-	return s.request(ctx, true, "GET", s.resource(path), nil)
+	return s.request(ctx, true, "GET", s.resource(path), nil, "")
 }
 
 // Download will download a file from Firebase
@@ -136,13 +146,7 @@ func (s *Storage) Read(path, downloadToken string) (io.ReadCloser, error) {
 
 // Put will store a file in Firebase Storage
 func (s *Storage) Put(ctx context.Context, file, path string) (map[string]interface{}, error) {
-	data, err := os.Open(file)
-	if err != nil {
-		return nil, err
-	}
-	defer data.Close()
-
-	res, err := s.request(ctx, true, "POST", s.resource(path), data)
+	res, err := s.request(ctx, true, "POST", s.resource(path), nil, file)
 	if err != nil {
 		return nil, err
 	}
@@ -164,7 +168,7 @@ func (s *Storage) Refresh(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	res, err := s.request(ctx, false, "POST", loc, bytes.NewBuffer(b))
+	res, err := s.request(ctx, false, "POST", loc, b, "")
 	if err != nil {
 		return err
 	}
